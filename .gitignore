@@ -1,0 +1,5 @@
+# Bỏ qua thư mục build và các file nhị phân đã biên dịch
+build/
+*.so
+*.o
+*.pyc
