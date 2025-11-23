@@ -11,13 +11,14 @@
 #include <iomanip>
 
 using namespace ns3;
-NS_LOG_COMPONENT_DEFINE("MeshNetworkCompact");
+NS_LOG_COMPONENT_DEFINE("MeshNetworkNetAnim");
 
 struct FlowResult {
     uint32_t caseId, nodes; double distance;
     std::string src, dst; uint64_t txPackets, rxPackets, lostPackets;
-    double lossPercent, delayUs, jitterUs, throughputKbps; bool found;
+    double lossPercent, delayUs, jitterMs, throughputKbps; bool found;
 };
+
 static FlowResult RunScenario(uint32_t caseId, uint32_t nMeshNodes, double distance, 
                                double simTime, bool enableAnim, uint32_t packetSize, 
                                double interval, uint32_t maxPackets) {
@@ -34,11 +35,15 @@ static FlowResult RunScenario(uint32_t caseId, uint32_t nMeshNodes, double dista
     
     if (nMeshNodes > 1) {
         Ptr<ConstantPositionMobilityModel> mobM1 = meshNodes.Get(1)->GetObject<ConstantPositionMobilityModel>();
-        if (mobM1) mobM1->SetPosition(Vector(20.0, 40.0, 0.0));
+        if (mobM1) mobM1->SetPosition(Vector(50.0, 0.0, 0.0));
     }
     
     YansWifiChannelHelper wifiChannel = YansWifiChannelHelper::Default();
-    YansWifiPhyHelper wifiPhy; wifiPhy.SetChannel(wifiChannel.Create());
+    YansWifiPhyHelper wifiPhy; 
+    wifiPhy.SetChannel(wifiChannel.Create());
+    // Bật PCAP để debug nếu cần
+    // wifiPhy.EnablePcapAll("mesh-pcap");
+    
     MeshHelper mesh = MeshHelper::Default();
     mesh.SetStackInstaller("ns3::Dot11sStack");
     NetDeviceContainer meshDevices = mesh.Install(wifiPhy, meshNodes);
@@ -59,23 +64,56 @@ static FlowResult RunScenario(uint32_t caseId, uint32_t nMeshNodes, double dista
     ApplicationContainer clientApp = echoClient.Install(meshNodes.Get(0));
     clientApp.Start(Seconds(2.0)); clientApp.Stop(Seconds(simTime - 2.0));
     
+    // ========== PHẦN QUAN TRỌNG CHO NETANIM ==========
     AnimationInterface *anim = nullptr;
     if (enableAnim) {
         std::ostringstream animName;
         animName << "mesh-" << nMeshNodes << "-" << caseId << "-d" << (int)distance << ".xml";
         anim = new AnimationInterface(animName.str().c_str());
+        
+        // 1. Bật ghi nhận packet metadata (QUAN TRỌNG NHẤT!)
+        anim->EnablePacketMetadata(true);
+        
+        // 2. Thiết lập tốc độ cập nhật vị trí
+        anim->SetMobilityPollInterval(Seconds(0.1));
+        
+        // 3. Giới hạn số packet ghi (tránh file quá lớn)
+        anim->SetMaxPktsPerTraceFile(500000);
+        
+        // 4. Bật IP/MAC tracking để thấy địa chỉ trong NetAnim
+        anim->EnableIpv4L3ProtocolCounters(Seconds(0), Seconds(simTime));
+        
+        // 5. Cấu hình node appearance
         for (uint32_t i = 0; i < nMeshNodes; i++) {
-            if (i == 0) { anim->UpdateNodeDescription(meshNodes.Get(i), "CLIENT");
-                anim->UpdateNodeColor(meshNodes.Get(i), 255, 0, 0); }
-            else if (i == nMeshNodes - 1) { anim->UpdateNodeDescription(meshNodes.Get(i), "SERVER");
-                anim->UpdateNodeColor(meshNodes.Get(i), 0, 0, 255); }
-            else { anim->UpdateNodeDescription(meshNodes.Get(i), "M" + std::to_string(i));
-                anim->UpdateNodeColor(meshNodes.Get(i), 0, 200, 0); }
+            std::ostringstream nodeDesc;
+            double size = 4.0;
+            uint8_t r = 0, g = 200, b = 0;
+            
+            if (i == 0) {
+                nodeDesc << "CLIENT\n" << meshInterfaces.GetAddress(0);
+                r = 255; g = 0; b = 0; size = 6.0;
+            } else if (i == nMeshNodes - 1) {
+                nodeDesc << "SERVER\n" << meshInterfaces.GetAddress(nMeshNodes - 1);
+                r = 0; g = 0; b = 255; size = 6.0;
+            } else {
+                nodeDesc << "M" << i << "\n" << meshInterfaces.GetAddress(i);
+                r = 0; g = 200; b = 0; size = 5.0;
+            }
+            
+            anim->UpdateNodeDescription(meshNodes.Get(i), nodeDesc.str());
+            anim->UpdateNodeColor(meshNodes.Get(i), r, g, b);
+            anim->UpdateNodeSize(meshNodes.Get(i)->GetId(), size, size);
         }
+        
+        std::cout << "NetAnim file: " << animName.str() << "\n";
     }
+    // ================================================
     
-    FlowMonitorHelper flowHelper; Ptr<FlowMonitor> flowMonitor = flowHelper.InstallAll();
-    Simulator::Stop(Seconds(simTime)); Simulator::Run();
+    FlowMonitorHelper flowHelper; 
+    Ptr<FlowMonitor> flowMonitor = flowHelper.InstallAll();
+    
+    Simulator::Stop(Seconds(simTime)); 
+    Simulator::Run();
     
     flowMonitor->CheckForLostPackets();
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
@@ -103,13 +141,17 @@ static FlowResult RunScenario(uint32_t caseId, uint32_t nMeshNodes, double dista
                      f.txPackets, f.rxPackets, lostPackets, lossRate, delayUs, jitterMs, throughputKbps, true};
             break;
         }
-    }    
+    }
+    
     if (anim) delete anim;
     Simulator::Destroy();
     return result;
 }
+
 int main(int argc, char **argv) {
+    // QUAN TRỌNG: Bật PacketMetadata TRƯỚC KHI tạo bất kỳ node nào
     PacketMetadata::Enable();
+    
     uint32_t nMeshNodes = 5, startNodes = 0, endNodes = 0, packetSize = 1024, maxPackets = 10;
     double distance = 20.0, simTime = 20.0, interval = 1.0, repeatDistance = 0.0;
     double startDistance = 0.0, endDistance = 0.0, stepDistance = 0.0;
@@ -131,7 +173,6 @@ int main(int argc, char **argv) {
     cmd.AddValue("stepDistance", "Step distance", stepDistance);
     cmd.Parse(argc, argv);
     
-    // Xóa các file XML cũ trước khi chạy
     std::cout << "Xoa cac file XML cu...\n";
     (void)system("rm -f mesh-*.xml");
     
@@ -153,13 +194,15 @@ int main(int argc, char **argv) {
             for (uint32_t nn = startNodes; nn <= endNodes; ++nn) {
                 allResults.push_back(RunScenario(nextCaseId++, nn, dist, simTime, enableAnim, packetSize, interval, maxPackets));
             }
-        }        
+        }
+        
         std::cout << "\n=== BANG SO SANH ===\n";
         std::cout << std::left << std::setw(6) << "Case" << std::setw(8) << "Nodes"
                   << std::setw(8) << "Dist" << std::setw(8) << "TX" << std::setw(8) << "RX"
                   << std::setw(10) << "Lost" << std::setw(10) << "Loss(%)"
                   << std::setw(12) << "Delay(us)" << std::setw(12) << "Jitter(ms)"
-                  << std::setw(14) << "Thr(kbps)\n" << std::string(100, '-') << "\n";        
+                  << std::setw(14) << "Thr(kbps)\n" << std::string(100, '-') << "\n";
+        
         for (const auto &r : allResults) {
             std::cout << std::left << std::setw(6) << r.caseId << std::setw(8) << r.nodes
                       << std::setw(8) << (int)r.distance
@@ -168,7 +211,7 @@ int main(int argc, char **argv) {
                       << std::setw(10) << (r.found ? r.lostPackets : 0)
                       << std::setw(10) << std::fixed << std::setprecision(2) << (r.found ? r.lossPercent : 0)
                       << std::setw(12) << std::setprecision(0) << (r.found ? r.delayUs : 0)
-                      << std::setw(12) << std::fixed << std::setprecision(5) << (r.found ? r.jitterUs : 0)
+                      << std::setw(12) << std::fixed << std::setprecision(5) << (r.found ? r.jitterMs : 0)
                       << std::setw(14) << std::setprecision(3) << (r.found ? r.throughputKbps : 0) << "\n";
         }
     } else {
